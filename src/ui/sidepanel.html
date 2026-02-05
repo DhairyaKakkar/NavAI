@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NavAI</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <!-- ── Header ──────────────────────────────────────── -->
+  <header id="header">
+    <h1>NavAI</h1>
+    <p class="subtitle">Step-by-step navigation assistant</p>
+  </header>
+
+  <!-- ── Goal input (shown when idle) ────────────────── -->
+  <section id="goal-section">
+    <label for="goal-input">What do you want to do?</label>
+    <textarea
+      id="goal-input"
+      rows="3"
+      placeholder='e.g. "Apply for driver&#39;s license"'
+    ></textarea>
+
+    <div class="mode-row">
+      <label class="mode-label">
+        <input type="radio" name="mode" value="heuristic" checked> Local (no API key)
+      </label>
+      <label class="mode-label">
+        <input type="radio" name="mode" value="llm"> LLM (remote)
+      </label>
+    </div>
+
+    <!-- LLM config (hidden by default) -->
+    <div id="llm-config" class="hidden">
+      <select id="llm-provider">
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="custom">Custom endpoint</option>
+      </select>
+      <input id="llm-endpoint" type="text" placeholder="API endpoint URL">
+      <input id="llm-key"      type="password" placeholder="API key">
+      <input id="llm-model"    type="text" placeholder="Model (e.g. gpt-4o-mini)">
+      <button id="save-llm" class="btn-sm">Save LLM settings</button>
+    </div>
+
+    <button id="start-btn" class="btn-primary">Start guiding</button>
+  </section>
+
+  <!-- ── Active guidance (shown when running) ─────────── -->
+  <section id="active-section" class="hidden">
+    <div id="goal-display" class="goal-display"></div>
+
+    <div id="step-card" class="step-card">
+      <div id="step-label" class="step-label"></div>
+      <div id="step-instruction" class="step-instruction">
+        Scanning page…
+      </div>
+      <div id="step-action" class="step-action"></div>
+    </div>
+
+    <div id="error-box" class="error-box hidden"></div>
+
+    <div class="controls">
+      <button id="rescan-btn"  class="btn-sm" title="Re-analyse the current page">Rescan</button>
+      <button id="skip-btn"    class="btn-sm" title="Skip this step">Skip</button>
+      <button id="stop-btn"    class="btn-danger" title="Stop guidance">Stop</button>
+    </div>
+
+    <details id="history-details">
+      <summary>History (<span id="history-count">0</span> steps)</summary>
+      <ol id="history-list"></ol>
+    </details>
+  </section>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
