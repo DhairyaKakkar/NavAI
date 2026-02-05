@@ -1,316 +1,319 @@
-/**
- * NavAI Planner — decides the next guidance step.
- *
- * Two modes:
- *   1. **Heuristic** (default, no API key) — rule‑based keyword scorer.
- *   2. **LLM**       (optional) — sends simplified page to a remote endpoint.
- *
- * ── Example scenario (driver's licence) ──────────────────────
- * Goal: "Apply for driver's license"
- *  Step 1 — homepage:  highlight link "Driver licensing"        → click
- *  Step 2 — sub‑page:  highlight link "Apply for a new license" → click
- *  Step 3 — form page: highlight input "NRIC / ID"              → type
- *  Step 4 — form page: highlight button "Next"                  → click
- */
+// ═══════════════════════════════════════════════════════════════
+// NavAI — Planner (Heuristic + LLM)
+// ═══════════════════════════════════════════════════════════════
 
-import type {
-  PageData,
-  PageElement,
-  GuidanceStep,
-  ActionType,
-  SessionState,
-  LLMConfig,
-} from './types';
+import type { PageData, PageElement, GuidanceStep, SessionState, LLMConfig, ActionType } from './types';
 
-// ── Helpers ──────────────────────────────────────────────────
+// ── Keywords ────────────────────────────────────────────────────
 
-const STOP_WORDS = new Set([
-  'a','an','the','for','to','of','in','on','at','and','or','is',
-  'my','i','me','it','do','be','this','that','with','from','by',
-]);
+const STOP_WORDS = new Set(['a','an','the','for','to','of','in','on','and','or','is','my','i','it','this','that']);
 
-function keywords(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 1 && !STOP_WORDS.has(w));
+function tokenize(s: string): string[] {
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
 }
 
-// ── Heuristic scorer ─────────────────────────────────────────
+// ── CTA / Penalty words ─────────────────────────────────────────
 
-const CTA_WORDS = [
-  'apply','start','begin','next','continue','submit',
-  'proceed','go','sign up','register','log in','login',
-  'search','get started','enroll','renew','schedule',
-];
+const CTA = ['apply','start','next','continue','submit','search','book','confirm','proceed','sign','log','register','enroll','flight','hotel','add','create','send','save','checkout','buy','order','pay'];
+const PENALTY = ['logout','cancel','back','close','skip','no thanks','maybe later','dismiss','advertisement','ad','cookie','privacy','terms','unsubscribe'];
 
-function score(el: PageElement, kw: string[], stepNum: number): number {
-  if (!el.isVisible || el.isDisabled) return -1000;
+// ── Heuristic scorer ────────────────────────────────────────────
 
+function score(el: PageElement, keywords: string[], usedSelectors: Set<string>, usedTexts: string[], hasOpenDialog: boolean): number {
   let s = 0;
-  const txt   = el.text.toLowerCase();
-  const aria  = (el.ariaLabel  ?? '').toLowerCase();
-  const href  = (el.href       ?? '').toLowerCase();
-  const ph    = (el.placeholder ?? '').toLowerCase();
-  const label = (el.formContext?.label ?? '').toLowerCase();
+  const txt = el.text.toLowerCase();
+  const lbl = el.label.toLowerCase();
 
-  // keyword relevance
-  for (const k of kw) {
-    if (txt.includes(k))   s += 10;
-    if (aria.includes(k))  s += 8;
-    if (href.includes(k))  s += 5;
-    if (ph.includes(k))    s += 4;
-    if (label.includes(k)) s += 8;
+  // Already used? Big penalty
+  if (usedSelectors.has(el.selector)) return -1000;
+  // Only penalize text match if text is non-empty and substantial
+  if (el.text.length > 3 && usedTexts.some(t => t.length > 3 && t.includes(el.text.substring(0, 20)))) return -500;
+
+  // CRITICAL: If dialog is open, elements outside it are essentially unusable
+  if (hasOpenDialog) {
+    if (el.isInDialog) {
+      s += 30; // Big bonus for being inside the dialog
+    } else {
+      return -2000; // Can't interact with elements behind a dialog
+    }
+  }
+
+  // Viewport bonus
+  if (el.isInViewport) s += 5;
+
+  // Keyword match
+  for (const k of keywords) {
+    if (txt.includes(k)) s += 15;
+    if (lbl.includes(k)) s += 12;
+    // Placeholder match (useful for inputs)
+    const ph = (el.placeholder ?? '').toLowerCase();
+    if (ph && ph.includes(k)) s += 10;
   }
 
   // CTA bonus
-  for (const c of CTA_WORDS) {
-    if (txt.includes(c))  s += 5;
-    if (aria.includes(c)) s += 4;
+  for (const c of CTA) {
+    if (txt.includes(c)) s += 8;
+    if (lbl.includes(c)) s += 6;
   }
 
-  // element‑type bonuses
-  if (el.tag === 'button' || el.type === 'submit') s += 3;
-  if (el.role === 'button')                        s += 2;
-  if (el.tag === 'a' && el.href)                   s += 1;
-
-  // form‑field boost on later steps (likely a form page)
-  if (stepNum > 1 && ['input','textarea','select'].includes(el.tag)) {
-    s += 2;
+  // Penalty words
+  for (const p of PENALTY) {
+    if (txt.includes(p)) s -= 20;
+    if (lbl.includes(p)) s -= 15;
   }
 
-  // primary / cta class hints
-  const cls = (el.dataTestId ?? '').toLowerCase();
-  if (/primary|cta|main/.test(cls)) s += 3;
+  // Element type bonuses
+  if (el.tag === 'button') s += 5;
+  if (el.role === 'button') s += 4;
+  if (el.tag === 'a') s += 2;
+  if (el.isInput) s += 3;
 
-  // penalise tiny or far‑off elements
-  if (el.rect.width < 10 || el.rect.height < 10) s -= 50;
-  if (el.rect.top < -500 || el.rect.top > 8000)  s -= 20;
+  // Size bonus (larger = more prominent)
+  if (el.rect.width > 100 && el.rect.height > 30) s += 3;
 
-  // small bonus for stable identifiers
-  if (el.id)         s += 1;
-  if (el.dataTestId) s += 1;
+  // Position bonus (higher on page = earlier in flow)
+  if (el.rect.top < 600) s += 2;
 
   return s;
 }
 
 function actionFor(el: PageElement): ActionType {
-  const tag = el.tag;
-  if (tag === 'input') {
-    const t = (el.type ?? 'text').toLowerCase();
-    if (['checkbox','radio','submit','button','reset','file','image'].includes(t)) return 'click';
+  if (el.isInput) {
+    const t = (el.inputType ?? 'text').toLowerCase();
+    if (['checkbox','radio','submit','button','file'].includes(t)) return 'click';
+    if (el.tag === 'select') return 'select';
     return 'type';
   }
-  if (tag === 'textarea') return 'type';
-  if (tag === 'select')   return 'select';
+  if (el.tag === 'select') return 'select';
   return 'click';
 }
 
-function instructionFor(el: PageElement, action: ActionType, _stepNum: number): string {
-  const label =
-    el.text.trim().substring(0, 60) ||
-    el.ariaLabel ||
-    el.placeholder ||
-    el.name ||
-    'this element';
-
-  switch (action) {
-    case 'click':
-      return `Click "${label}"`;
-    case 'type': {
-      const field = el.formContext?.label || el.placeholder || el.ariaLabel || el.name || 'the field';
-      return `Type your information in "${field}"`;
-    }
-    case 'select': {
-      const field = el.formContext?.label || el.ariaLabel || el.name || 'the dropdown';
-      return `Select an option from "${field}"`;
-    }
-    case 'scroll':
-      return 'Scroll down to see more options';
-    case 'wait':
-      return 'Wait for the page to finish loading';
-  }
+function instructionFor(el: PageElement, action: ActionType): string {
+  const name = el.text.substring(0, 50) || el.label || el.placeholder || 'this element';
+  if (action === 'click') return `Click "${name}"`;
+  if (action === 'type') return `Enter your ${el.label || el.placeholder || 'information'} here`;
+  if (action === 'select') return `Select an option from "${name}"`;
+  return `Interact with "${name}"`;
 }
 
-function buildStep(el: PageElement, action: ActionType, stepNum: number): GuidanceStep {
+// ── Heuristic Planner ───────────────────────────────────────────
+
+export function heuristicPlan(page: PageData, state: SessionState): GuidanceStep | null {
+  if (page.elements.length === 0) return null;
+
+  const kw = tokenize(state.goal);
+  const usedSelectors = new Set(state.history.map(h => h.selector));
+  const usedTexts = state.history.map(h => h.text).filter(t => t.length > 3);
+
+  // Score and rank
+  const ranked = page.elements
+    .map(el => ({ el, score: score(el, kw, usedSelectors, usedTexts, page.hasOpenDialog) }))
+    .filter(x => x.score > -500)
+    .sort((a, b) => b.score - a.score);
+
+  // Require a minimum relevance score — don't suggest random elements
+  // Score of 10+ means at least one keyword matched or strong CTA signal
+  if (ranked.length === 0 || ranked[0].score < 10) {
+    // No relevant element found — don't waste the user's time
+    return null;
+  }
+
+  const best = ranked[0].el;
+  const action = actionFor(best);
+
   return {
-    stepTitle: `Step ${stepNum}`,
-    instruction: instructionFor(el, action, stepNum),
+    stepNumber: state.step,
     action,
-    target: {
-      strategy: el.cssSelector ? 'css' : 'text',
-      selector: el.cssSelector,
-      textHint: el.text.substring(0, 80),
-    },
-    validation: {
-      event: action === 'type' ? 'input' : action === 'select' ? 'change' : 'click',
-      successHint: `Completed: ${action} on "${el.text.substring(0, 40)}"`,
-    },
+    selector: best.selector,
+    textHint: best.text.substring(0, 60),
+    instruction: instructionFor(best, action),
   };
 }
 
-// ── Public: heuristic planner ────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// LLM Planner
+// ═════════════════════════════════════════════════════════════════
 
-export function heuristicPlan(
-  page: PageData,
-  state: SessionState,
-): GuidanceStep | null {
-  if (page.elements.length === 0) return null;
+const SYSTEM_PROMPT = `You are NavAI, a browser navigation assistant that helps users accomplish tasks step-by-step.
 
-  const kw = keywords(state.goal);
+You will receive:
+1. The user's goal
+2. The current page URL and title
+3. Whether a dialog/modal is currently open
+4. A numbered list of interactive elements on the page
+5. Previous actions already taken
 
-  const ranked = page.elements
-    .map(el => ({ el, s: score(el, kw, state.currentStepNumber) }))
-    .filter(x => x.s > 0)
-    .sort((a, b) => b.s - a.s);
+Your job: Pick the SINGLE best next action to make progress toward the goal.
 
-  if (ranked.length > 0) {
-    const best   = ranked[0].el;
-    const action = actionFor(best);
-    return buildStep(best, action, state.currentStepNumber);
-  }
+Available actions:
+- click(id) — Click on element with given ID
+- type(id) — Focus on input element with given ID (user will type)
+- select(id) — Focus on dropdown with given ID (user will select)
+- wait() — No clear action available, wait
 
-  // Fallback — pick the most prominent visible interactive element
-  const fallback = page.elements
-    .filter(el => el.isVisible && !el.isDisabled)
-    .filter(el => ['button','a','input','textarea','select'].includes(el.tag))
-    .sort((a, b) => (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+IMPORTANT RULES:
+- Pick exactly ONE action per response
+- Use the element ID number from the list
+- NEVER repeat an action on the same element from "Previous actions"
+- If a dialog/modal is open, you MUST pick an element marked [DIALOG] — elements behind the dialog are not clickable
+- Prefer elements that logically advance the task (e.g., fill inputs before clicking submit)
+- If the goal seems complete or you're stuck, use wait()
 
-  if (fallback.length === 0) return null;
-
-  const best   = fallback[0];
-  const action = actionFor(best);
-  return buildStep(best, action, state.currentStepNumber);
-}
-
-// ── Public: LLM planner ──────────────────────────────────────
-
-const LLM_SYSTEM = `You are NavAI, a navigation assistant.
-Given a user's goal and a webpage's interactive elements, determine the single best next action.
-
-Respond with ONLY valid JSON matching this schema:
-{
-  "stepTitle":   "string",
-  "instruction": "string (human‑friendly, e.g. 'Click the Apply Now button')",
-  "action":      "click|type|select|scroll|wait",
-  "target":      { "strategy": "css|xpath|text", "selector": "string", "textHint": "string" },
-  "validation":  { "event": "click|input|change|navigation", "successHint": "string" }
-}
-
-Rules:
-- Pick ONLY ONE action — the most important next step toward the goal.
-- Prefer stable selectors (id, name, aria‑label, data‑testid).
-- Keep instructions concise and friendly.
-- If no clear action exists, use action "wait".`;
+Response format:
+<Thought>Brief reasoning about what to do next</Thought>
+<Action>click(5)</Action>`;
 
 export async function llmPlan(
   page: PageData,
   state: SessionState,
-  config: LLMConfig,
+  config: LLMConfig
 ): Promise<GuidanceStep | null> {
-  // Build a concise element list (max 50)
-  const elSummary = page.elements
-    .filter(el => el.isVisible && !el.isDisabled)
-    .slice(0, 50)
-    .map(el => {
-      const p = [`[${el.index}] <${el.tag}>`];
-      if (el.text)        p.push(`text="${el.text.substring(0, 100)}"`);
-      if (el.ariaLabel)   p.push(`aria="${el.ariaLabel}"`);
-      if (el.id)          p.push(`id="${el.id}"`);
-      if (el.name)        p.push(`name="${el.name}"`);
-      if (el.type)        p.push(`type="${el.type}"`);
-      if (el.href)        p.push(`href="${el.href.substring(0, 100)}"`);
-      if (el.placeholder) p.push(`placeholder="${el.placeholder}"`);
-      if (el.cssSelector) p.push(`css="${el.cssSelector}"`);
-      return p.join(' ');
-    })
-    .join('\n');
+  // Build element list — richer context
+  const elementList = page.elements.slice(0, 50).map(el => {
+    const parts = [`[${el.idx}]`];
 
-  const history = state.actionHistory
-    .slice(-5)
-    .map(h => `  Step ${h.stepNumber}: ${h.action} at ${h.url}`)
-    .join('\n') || '  (none)';
+    // Flags
+    const flags: string[] = [];
+    if (el.isInDialog) flags.push('DIALOG');
+    if (!el.isInViewport) flags.push('OFFSCREEN');
+    if (flags.length) parts.push(`[${flags.join(',')}]`);
 
-  const userMsg = [
-    `Goal: "${state.goal}"`,
-    `Current step: ${state.currentStepNumber}`,
-    `URL: ${page.url}`,
-    `Title: ${page.title}`,
-    '',
-    'Previous actions:',
-    history,
-    '',
-    'Interactive elements:',
-    elSummary,
-    '',
-    'Page text (excerpt):',
-    page.pageText.substring(0, 500),
-  ].join('\n');
+    parts.push(el.tag);
+    if (el.role !== el.tag) parts.push(`role="${el.role}"`);
+    if (el.text) parts.push(`"${el.text.substring(0, 60)}"`);
+    if (el.label) parts.push(`label="${el.label}"`);
+    if (el.placeholder) parts.push(`placeholder="${el.placeholder}"`);
+    if (el.isInput) parts.push(`(input:${el.inputType || 'text'})`);
+    return parts.join(' ');
+  }).join('\n');
+
+  // Previous actions with text context
+  const prevActions = state.history.length > 0
+    ? state.history.slice(-8).map(h =>
+        `Step ${h.step}: ${h.action} on "${h.text}" [${h.selector}]`
+      ).join('\n')
+    : '(none yet)';
+
+  const dialogNote = page.hasOpenDialog
+    ? '\n⚠️ A DIALOG/MODAL IS OPEN. You MUST pick an element marked [DIALOG]. Other elements are not clickable.'
+    : '';
+
+  const userPrompt = `Goal: ${state.goal}
+
+Current URL: ${page.url}
+Page title: ${page.title}${dialogNote}
+
+Previous actions (${state.history.length} total):
+${prevActions}
+
+Interactive elements on page (${page.elements.length} total):
+${elementList}
+
+What is the single best next action?`;
 
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     let body: string;
+    let url = config.endpoint;
 
     if (config.provider === 'openai') {
       headers['Authorization'] = `Bearer ${config.apiKey}`;
       body = JSON.stringify({
         model: config.model || 'gpt-4o-mini',
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
+        temperature: 0,
+        max_tokens: 300,
         messages: [
-          { role: 'system', content: LLM_SYSTEM },
-          { role: 'user',   content: userMsg },
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
         ],
+        stop: ['</Action>'],
       });
     } else if (config.provider === 'anthropic') {
-      headers['x-api-key']          = config.apiKey;
-      headers['anthropic-version']   = '2023-06-01';
+      headers['x-api-key'] = config.apiKey;
+      headers['anthropic-version'] = '2023-06-01';
       body = JSON.stringify({
         model: config.model || 'claude-sonnet-4-20250514',
-        max_tokens: 512,
-        system: LLM_SYSTEM,
-        messages: [{ role: 'user', content: userMsg }],
+        max_tokens: 300,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: userPrompt }],
+        stop_sequences: ['</Action>'],
       });
     } else {
-      // Custom / OpenAI‑compatible
       headers['Authorization'] = `Bearer ${config.apiKey}`;
       body = JSON.stringify({
         model: config.model,
-        temperature: 0.1,
+        temperature: 0,
+        max_tokens: 300,
         messages: [
-          { role: 'system', content: LLM_SYSTEM },
-          { role: 'user',   content: userMsg },
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
         ],
       });
     }
 
-    const res = await fetch(config.endpoint, { method: 'POST', headers, body });
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+
+    const res = await fetch(url, { method: 'POST', headers, body, signal: ctrl.signal });
+    clearTimeout(timer);
+
     if (!res.ok) {
-      console.error(`[NavAI] LLM ${res.status}: ${res.statusText}`);
+      const errText = await res.text().catch(() => '');
+      console.error('[NavAI] LLM error:', res.status, errText.substring(0, 200));
       return null;
     }
 
     const json = await res.json();
-
     let raw: string;
+
     if (config.provider === 'anthropic') {
-      raw = json.content?.[0]?.text ?? '';
+      raw = (json.content?.[0]?.text ?? '') + '</Action>';
     } else {
-      raw = json.choices?.[0]?.message?.content ?? '';
+      raw = (json.choices?.[0]?.message?.content ?? '') + '</Action>';
     }
 
-    // Strip markdown fences if present
-    const m = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const parsed: GuidanceStep = JSON.parse(m ? m[1].trim() : raw.trim());
+    console.log('[NavAI] LLM response:', raw);
 
-    if (!parsed.stepTitle || !parsed.instruction || !parsed.action || !parsed.target || !parsed.validation) {
-      console.error('[NavAI] LLM response missing required fields');
+    // Parse response
+    const actionMatch = raw.match(/<Action>(\w+)\((\d+)?\)<\/Action>/i);
+    if (!actionMatch) {
+      console.log('[NavAI] Could not parse action from response');
       return null;
     }
-    return parsed;
-  } catch (err) {
-    console.error('[NavAI] LLM planner error:', err);
+
+    const actionName = actionMatch[1].toLowerCase();
+    const elementId = actionMatch[2] ? parseInt(actionMatch[2], 10) : -1;
+
+    if (actionName === 'wait' || elementId < 0) {
+      return null;
+    }
+
+    const el = page.elements.find(e => e.idx === elementId);
+    if (!el) {
+      console.log('[NavAI] Element not found:', elementId);
+      return null;
+    }
+
+    const thoughtMatch = raw.match(/<Thought>(.*?)<\/Thought>/is);
+    const thought = thoughtMatch ? thoughtMatch[1].trim() : '';
+
+    let action: ActionType = 'click';
+    if (actionName === 'type') action = 'type';
+    if (actionName === 'select') action = 'select';
+
+    return {
+      stepNumber: state.step,
+      action,
+      selector: el.selector,
+      textHint: el.text.substring(0, 60),
+      instruction: thought || instructionFor(el, action),
+    };
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      console.log('[NavAI] LLM request timed out');
+    } else {
+      console.error('[NavAI] LLM error:', err.message);
+    }
     return null;
   }
 }

@@ -4,72 +4,195 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NavAI</title>
-  <link rel="stylesheet" href="sidepanel.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      padding: 16px;
+      background: #fafafa;
+      color: #1e1e2e;
+      font-size: 14px;
+    }
+    h1 {
+      font-size: 20px;
+      color: #6366f1;
+      margin-bottom: 4px;
+    }
+    .subtitle {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 16px;
+    }
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    textarea, input, select {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+    textarea { resize: vertical; min-height: 70px; }
+    textarea:focus, input:focus, select:focus {
+      outline: none;
+      border-color: #6366f1;
+    }
+    .btn {
+      padding: 10px 16px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-primary {
+      background: #6366f1;
+      color: #fff;
+      width: 100%;
+    }
+    .btn-primary:hover { background: #4f46e5; }
+    .btn-primary:disabled { background: #a5a6f6; cursor: not-allowed; }
+    .btn-sm {
+      padding: 8px 12px;
+      font-size: 12px;
+      background: #e5e5e5;
+      color: #333;
+    }
+    .btn-sm:hover { background: #d5d5d5; }
+    .btn-danger {
+      background: #ef4444;
+      color: #fff;
+    }
+    .btn-danger:hover { background: #dc2626; }
+    .controls {
+      display: flex;
+      gap: 8px;
+      margin: 12px 0;
+    }
+    .hidden { display: none !important; }
+    .goal-display {
+      background: #f0f0ff;
+      padding: 10px;
+      border-radius: 8px;
+      margin-bottom: 12px;
+      font-weight: 500;
+    }
+    .step-card {
+      background: #fff;
+      border: 2px solid #6366f1;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .step-num {
+      font-size: 11px;
+      font-weight: 700;
+      color: #6366f1;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .instruction {
+      font-size: 15px;
+      line-height: 1.4;
+    }
+    .error {
+      background: #fee2e2;
+      border: 1px solid #fca5a5;
+      color: #991b1b;
+      padding: 10px;
+      border-radius: 8px;
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+    details {
+      margin-top: 16px;
+    }
+    summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: #666;
+      font-size: 13px;
+    }
+    ol {
+      margin-top: 8px;
+      padding-left: 20px;
+      font-size: 12px;
+      color: #666;
+    }
+    li { margin-bottom: 4px; }
+    .llm-section {
+      background: #f5f5f5;
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
+    .llm-section label { font-size: 12px; margin-bottom: 4px; }
+    .llm-section input, .llm-section select { margin-bottom: 8px; }
+  </style>
 </head>
 <body>
-  <!-- ── Header ──────────────────────────────────────── -->
-  <header id="header">
-    <h1>NavAI</h1>
-    <p class="subtitle">Step-by-step navigation assistant</p>
-  </header>
+  <h1>NavAI</h1>
+  <p class="subtitle">Step-by-step navigation assistant</p>
 
-  <!-- ── Goal input (shown when idle) ────────────────── -->
+  <!-- Goal Section (idle state) -->
   <section id="goal-section">
-    <label for="goal-input">What do you want to do?</label>
-    <textarea
-      id="goal-input"
-      rows="3"
-      placeholder='e.g. "Apply for driver&#39;s license"'
-    ></textarea>
+    <label for="goal">What do you want to do?</label>
+    <textarea id="goal" placeholder='e.g. "Book a flight on MakeMyTrip"'></textarea>
 
-    <div class="mode-row">
-      <label class="mode-label">
-        <input type="radio" name="mode" value="heuristic" checked> Local (no API key)
-      </label>
-      <label class="mode-label">
-        <input type="radio" name="mode" value="llm"> LLM (remote)
-      </label>
-    </div>
+    <label for="mode">Mode</label>
+    <select id="mode">
+      <option value="heuristic">Local (no API key)</option>
+      <option value="llm">LLM (remote)</option>
+    </select>
 
-    <!-- LLM config (hidden by default) -->
-    <div id="llm-config" class="hidden">
-      <select id="llm-provider">
+    <div id="llm-section" class="llm-section hidden">
+      <label for="provider">Provider</label>
+      <select id="provider">
         <option value="openai">OpenAI</option>
         <option value="anthropic">Anthropic</option>
-        <option value="custom">Custom endpoint</option>
+        <option value="custom">Custom</option>
       </select>
-      <input id="llm-endpoint" type="text" placeholder="API endpoint URL">
-      <input id="llm-key"      type="password" placeholder="API key">
-      <input id="llm-model"    type="text" placeholder="Model (e.g. gpt-4o-mini)">
-      <button id="save-llm" class="btn-sm">Save LLM settings</button>
+
+      <label for="endpoint">API Endpoint</label>
+      <input id="endpoint" type="text" placeholder="https://api.openai.com/v1/chat/completions">
+
+      <label for="apikey">API Key</label>
+      <input id="apikey" type="password" placeholder="sk-...">
+
+      <label for="model">Model</label>
+      <input id="model" type="text" placeholder="gpt-4o-mini">
+
+      <button id="save-llm" class="btn btn-sm">Save</button>
     </div>
 
-    <button id="start-btn" class="btn-primary">Start guiding</button>
+    <button id="start" class="btn btn-primary">Start Guiding</button>
   </section>
 
-  <!-- ── Active guidance (shown when running) ─────────── -->
+  <!-- Active Section (running state) -->
   <section id="active-section" class="hidden">
     <div id="goal-display" class="goal-display"></div>
 
-    <div id="step-card" class="step-card">
-      <div id="step-label" class="step-label"></div>
-      <div id="step-instruction" class="step-instruction">
-        Scanning page…
-      </div>
-      <div id="step-action" class="step-action"></div>
+    <div class="step-card">
+      <div id="step-num" class="step-num">Step 1</div>
+      <div id="instruction" class="instruction">Scanning page...</div>
     </div>
 
-    <div id="error-box" class="error-box hidden"></div>
+    <div id="error" class="error hidden"></div>
 
     <div class="controls">
-      <button id="rescan-btn"  class="btn-sm" title="Re-analyse the current page">Rescan</button>
-      <button id="skip-btn"    class="btn-sm" title="Skip this step">Skip</button>
-      <button id="stop-btn"    class="btn-danger" title="Stop guidance">Stop</button>
+      <button id="rescan" class="btn btn-sm">Rescan</button>
+      <button id="skip" class="btn btn-sm">Skip</button>
+      <button id="stop" class="btn btn-sm btn-danger">Stop</button>
     </div>
 
-    <details id="history-details">
-      <summary>History (<span id="history-count">0</span> steps)</summary>
-      <ol id="history-list"></ol>
+    <details>
+      <summary>History</summary>
+      <ol id="history"></ol>
     </details>
   </section>
 

@@ -1,256 +1,248 @@
-/**
- * NavAI — Background Service Worker (MV3)
- *
- * Orchestrates message flow between the side‑panel UI and the
- * per‑tab content script.  Runs the planner and persists session
- * state in chrome.storage.local.
- */
+// ═══════════════════════════════════════════════════════════════
+// NavAI — Background Service Worker
+// ═══════════════════════════════════════════════════════════════
 
 import type { Message, SessionState, PageData, GuidanceStep, LLMConfig } from './shared/types';
 import { heuristicPlan, llmPlan } from './shared/planner';
 
-// ── Debug ────────────────────────────────────────────────────
+const log = (...a: unknown[]) => console.debug('[NavAI:bg]', ...a);
 
-const DEBUG = true;
-const log = (...a: unknown[]) => { if (DEBUG) console.debug('[NavAI:bg]', ...a); };
+// ═════════════════════════════════════════════════════════════════
+// STATE
+// ═════════════════════════════════════════════════════════════════
 
-// ── State ────────────────────────────────────────────────────
-
-const EMPTY: SessionState = {
+const EMPTY_STATE: SessionState = {
   goal: '',
-  isActive: false,
-  currentStepNumber: 1,
-  currentStep: null,
-  actionHistory: [],
-  plannerMode: 'heuristic',
+  active: false,
+  step: 1,
+  current: null,
+  history: [],
+  mode: 'heuristic',
 };
 
-let session: SessionState = { ...EMPTY };
-let llmCfg: LLMConfig | null = null;
+let state: SessionState = { ...EMPTY_STATE };
+let llmConfig: LLMConfig | null = null;
+let processing = false; // Guard against concurrent processTab calls
 
-async function save() {
-  await chrome.storage.local.set({ navai_session: session });
+async function saveState() {
+  await chrome.storage.local.set({ navai_state: state });
 }
 
-async function load() {
-  const r = await chrome.storage.local.get(['navai_session', 'navai_llm_config']);
-  if (r.navai_session)    session = r.navai_session;
-  if (r.navai_llm_config) llmCfg  = r.navai_llm_config;
+async function loadState() {
+  const r = await chrome.storage.local.get(['navai_state', 'navai_llm']);
+  if (r.navai_state) state = r.navai_state;
+  if (r.navai_llm) llmConfig = r.navai_llm;
 }
 
-// ── Side‑panel opens on toolbar‑icon click ───────────────────
+// ═════════════════════════════════════════════════════════════════
+// SIDE PANEL
+// ═════════════════════════════════════════════════════════════════
 
-chrome.sidePanel
-  .setPanelBehavior({ openPanelOnActionClick: true })
-  .catch(() => { /* Chrome < 116 fallback — ignored */ });
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
-// ── Planner wrapper ──────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// PLANNER
+// ═════════════════════════════════════════════════════════════════
 
 async function plan(page: PageData): Promise<GuidanceStep | null> {
-  log('Planning …', session.plannerMode);
+  log('Planning...', state.mode);
 
-  if (session.plannerMode === 'llm' && llmCfg?.apiKey) {
-    const step = await llmPlan(page, session, llmCfg);
+  if (state.mode === 'llm' && llmConfig?.apiKey) {
+    const step = await llmPlan(page, state, llmConfig);
     if (step) return step;
-    log('LLM returned null — falling back to heuristic');
+    log('LLM failed, falling back to heuristic');
   }
 
-  return heuristicPlan(page, session);
+  return heuristicPlan(page, state);
 }
 
-// ── Broadcast state to side‑panel ────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// LOOP DETECTION
+// ═════════════════════════════════════════════════════════════════
 
-function broadcast() {
-  const msg: Message = { type: 'STATE_UPDATE', state: { ...session } };
-  chrome.runtime.sendMessage(msg).catch(() => {
-    // Side‑panel may not be open — that's fine.
-  });
+function isStuck(step: GuidanceStep): boolean {
+  const recent = state.history.slice(-3);
+  if (recent.length < 3) return false;
+  // Check both selector and text match to catch loops
+  const sameSelector = recent.every(h => h.selector === step.selector);
+  const sameText = step.textHint.length > 3 && recent.every(h => h.text === step.textHint);
+  return sameSelector || sameText;
 }
 
-// ── Send overlay command to a tab's content script ───────────
-
-async function showStep(tabId: number, step: GuidanceStep) {
-  try {
-    await chrome.tabs.sendMessage(tabId, {
-      type: 'SHOW_STEP',
-      step,
-      stepNumber: session.currentStepNumber,
-    } as Message);
-  } catch (e) { log('showStep failed:', e); }
-}
-
-async function clearOverlay(tabId: number) {
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: 'CLEAR_OVERLAY' } as Message);
-  } catch { /* tab may have closed */ }
-}
-
-// ── Core: extract → plan → show ──────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// CORE FLOW
+// ═════════════════════════════════════════════════════════════════
 
 async function processTab(tabId: number) {
-  if (!session.isActive) return;
-  log('processTab', tabId);
+  if (!state.active) return;
+  if (processing) {
+    log('Already processing, skipping');
+    return;
+  }
+
+  processing = true;
+  log('Processing tab', tabId);
 
   try {
-    const resp: any = await chrome.tabs.sendMessage(tabId, { type: 'EXTRACT_PAGE' } as Message);
+    const resp = await chrome.tabs.sendMessage(tabId, { type: 'EXTRACT' } as Message);
 
     if (!resp || resp.type !== 'PAGE_DATA') {
-      log('Bad EXTRACT_PAGE response');
+      log('No page data');
       return;
     }
 
     const page: PageData = resp.data;
-    log(`Page: ${page.url}  elements: ${page.elements.length}`);
+    log(`Page: ${page.url}, ${page.elements.length} elements, dialog: ${page.hasOpenDialog}`);
 
-    const step = await plan(page);
+    let step = await plan(page);
+
+    if (step && isStuck(step)) {
+      log('Stuck loop detected');
+      broadcast({ type: 'ERROR', msg: 'Seems stuck on the same element. Try rephrasing your goal or click Skip.' });
+      step = null;
+    }
 
     if (step) {
-      session.currentStep = step;
-      await save();
-      broadcast();
-      await showStep(tabId, step);
+      state.current = step;
+      await saveState();
+      broadcast({ type: 'STATE', state: { ...state } });
+      await chrome.tabs.sendMessage(tabId, { type: 'SHOW_STEP', step } as Message);
     } else {
-      session.currentStep = null;
-      await save();
-      broadcast();
-      chrome.runtime.sendMessage({
-        type: 'ERROR',
-        message: 'Could not determine the next step on this page. Try "Rescan" or rephrase your goal.',
-      } as Message).catch(() => {});
+      state.current = null;
+      await saveState();
+      broadcast({ type: 'STATE', state: { ...state } });
+      broadcast({ type: 'ERROR', msg: 'No clear next step. Try "Rescan" or rephrase your goal.' });
     }
   } catch (e) {
-    log('processTab error (will retry):', e);
-    // Content script may not be injected yet — retry once
-    setTimeout(() => {
-      chrome.tabs.sendMessage(tabId, { type: 'EXTRACT_PAGE' } as Message)
-        .then(async (resp: any) => {
-          if (resp?.type !== 'PAGE_DATA') return;
+    log('Process error:', e);
+    // Retry once after delay (content script may not be ready)
+    setTimeout(async () => {
+      try {
+        const resp = await chrome.tabs.sendMessage(tabId, { type: 'EXTRACT' } as Message);
+        if (resp?.type === 'PAGE_DATA') {
           const step = await plan(resp.data);
           if (step) {
-            session.currentStep = step;
-            await save();
-            broadcast();
-            await showStep(tabId, step);
+            state.current = step;
+            await saveState();
+            broadcast({ type: 'STATE', state: { ...state } });
+            await chrome.tabs.sendMessage(tabId, { type: 'SHOW_STEP', step } as Message);
           }
-        })
-        .catch(() => {});
-    }, 1500);
+        }
+      } catch {}
+    }, 1000);
+  } finally {
+    processing = false;
   }
 }
 
-// ── Active‑tab helper ────────────────────────────────────────
-
-async function activeTabId(): Promise<number | undefined> {
+async function getActiveTabId(): Promise<number | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab?.id;
 }
 
-// ── Message router ───────────────────────────────────────────
+function broadcast(msg: Message) {
+  chrome.runtime.sendMessage(msg).catch(() => {});
+}
+
+// ═════════════════════════════════════════════════════════════════
+// MESSAGE HANDLING
+// ═════════════════════════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((msg: Message, sender, respond) => {
-  log('msg:', msg.type, sender.tab?.id ?? 'ext');
+  log('Message:', msg.type);
 
   switch (msg.type) {
-
-    // ── Start guidance ─────────────────────────────────────
-    case 'START_GUIDANCE': {
-      session = {
-        ...EMPTY,
+    case 'START': {
+      state = {
+        ...EMPTY_STATE,
         goal: msg.goal,
-        isActive: true,
-        plannerMode: msg.mode,
+        active: true,
+        mode: msg.mode,
       };
-      save().then(async () => {
-        broadcast();
-        const id = await activeTabId();
+      saveState().then(async () => {
+        broadcast({ type: 'STATE', state: { ...state } });
+        const id = await getActiveTabId();
         if (id) processTab(id);
       });
       respond({ ok: true });
       return true;
     }
 
-    // ── Stop guidance ──────────────────────────────────────
-    case 'STOP_GUIDANCE': {
-      session = { ...EMPTY };
-      save().then(async () => {
-        broadcast();
-        const id = await activeTabId();
-        if (id) clearOverlay(id);
+    case 'STOP': {
+      state = { ...EMPTY_STATE };
+      saveState().then(async () => {
+        broadcast({ type: 'STATE', state: { ...state } });
+        const id = await getActiveTabId();
+        if (id) chrome.tabs.sendMessage(id, { type: 'HIDE_OVERLAY' } as Message).catch(() => {});
       });
       respond({ ok: true });
       return true;
     }
 
-    // ── Rescan current page ────────────────────────────────
+    case 'SKIP': {
+      if (state.current) {
+        state.history.push({
+          step: state.step,
+          action: state.current.action,
+          selector: state.current.selector,
+          text: state.current.textHint,
+        });
+      }
+      state.step++;
+      state.current = null;
+      saveState().then(async () => {
+        broadcast({ type: 'STATE', state: { ...state } });
+        const id = await getActiveTabId();
+        if (id) processTab(id);
+      });
+      respond({ ok: true });
+      return true;
+    }
+
     case 'RESCAN': {
-      activeTabId().then(id => { if (id) processTab(id); });
+      getActiveTabId().then(id => { if (id) processTab(id); });
       respond({ ok: true });
       return true;
     }
 
-    // ── Skip current step (manual advance) ─────────────────
-    case 'SKIP_STEP': {
-      if (session.currentStep) {
-        session.actionHistory.push({
-          stepNumber: session.currentStepNumber,
-          action: session.currentStep.action,
-          url: '',
-          timestamp: Date.now(),
-        });
-      }
-      session.currentStepNumber++;
-      session.currentStep = null;
-      save().then(async () => {
-        broadcast();
-        const id = await activeTabId();
-        if (id) processTab(id);
-      });
-      respond({ ok: true });
-      return true;
-    }
+    case 'ACTION_DONE': {
+      if (!state.active) return false;
+      log('Action done:', msg.action);
 
-    // ── Content script reports completed action ────────────
-    case 'ACTION_COMPLETED': {
-      if (!session.isActive) return false;
-      log('Action completed:', msg.action);
-
-      if (session.currentStep) {
-        session.actionHistory.push({
-          stepNumber: session.currentStepNumber,
+      if (state.current) {
+        state.history.push({
+          step: state.step,
           action: msg.action,
-          url: sender.tab?.url ?? '',
-          timestamp: Date.now(),
+          selector: state.current.selector,
+          text: state.current.textHint,
         });
       }
-      session.currentStepNumber++;
-      session.currentStep = null;
+      state.step++;
+      state.current = null;
 
-      save().then(() => {
-        broadcast();
-        // After a click the page may navigate — delay rescan slightly
-        const delay = msg.action === 'click' ? 600 : 100;
-        setTimeout(() => {
-          const tabId = sender.tab?.id;
-          if (tabId) processTab(tabId);
-        }, delay);
+      saveState().then(() => {
+        broadcast({ type: 'STATE', state: { ...state } });
+        // Delay to allow navigation
+        setTimeout(async () => {
+          const id = sender.tab?.id ?? await getActiveTabId();
+          if (id) processTab(id);
+        }, msg.action === 'click' ? 500 : 100);
       });
       respond({ ok: true });
       return true;
     }
 
-    // ── Side‑panel requests current state ──────────────────
-    case 'GET_STATE': {
-      respond({ type: 'STATE_UPDATE', state: { ...session } });
+    case 'NAV_CHANGE': {
+      if (!state.active) return false;
+      log('Nav change:', msg.url);
+      const tabId = sender.tab?.id;
+      if (tabId) setTimeout(() => processTab(tabId), 600);
+      respond({ ok: true });
       return true;
     }
 
-    // ── SPA navigation detected by content script ──────────
-    case 'NAVIGATION_DETECTED': {
-      if (!session.isActive) return false;
-      log('SPA nav:', msg.url);
-      const tabId = sender.tab?.id;
-      if (tabId) setTimeout(() => processTab(tabId), 800);
-      respond({ ok: true });
+    case 'GET_STATE': {
+      respond({ type: 'STATE', state: { ...state } });
       return true;
     }
   }
@@ -258,15 +250,19 @@ chrome.runtime.onMessage.addListener((msg: Message, sender, respond) => {
   return false;
 });
 
-// ── webNavigation — detect full‑page navigations ─────────────
+// ═════════════════════════════════════════════════════════════════
+// NAVIGATION LISTENER
+// ═════════════════════════════════════════════════════════════════
 
 chrome.webNavigation.onCompleted.addListener(details => {
-  if (details.frameId !== 0) return; // main frame only
-  if (!session.isActive) return;
-  log('webNav completed:', details.url);
-  setTimeout(() => processTab(details.tabId), 600);
+  if (details.frameId !== 0) return;
+  if (!state.active) return;
+  log('Page loaded:', details.url);
+  setTimeout(() => processTab(details.tabId), 500);
 });
 
-// ── Boot ─────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// INIT
+// ═════════════════════════════════════════════════════════════════
 
-load().then(() => log('Background ready. Active:', session.isActive));
+loadState().then(() => log('Background ready, active:', state.active));

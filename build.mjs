@@ -29,9 +29,7 @@ async function run() {
   }
 
   // Copy static assets into dist/
-  cpSync('manifest.json',        'dist/manifest.json');
   cpSync('src/ui/sidepanel.html', 'dist/ui/sidepanel.html');
-  cpSync('src/ui/sidepanel.css',  'dist/ui/sidepanel.css');
 
   if (!watch) console.log('\n  Build complete → dist/\n');
 }

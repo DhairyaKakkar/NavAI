@@ -1,120 +1,84 @@
-// ── Action & strategy enums ──────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// NavAI — Shared Types
+// ═══════════════════════════════════════════════════════════════
 
-export type ActionType       = 'click' | 'type' | 'select' | 'scroll' | 'wait';
-export type SelectorStrategy = 'css' | 'xpath' | 'text';
-export type ValidationEvent  = 'click' | 'input' | 'change' | 'navigation';
-export type PlannerMode      = 'heuristic' | 'llm';
+export type ActionType = 'click' | 'type' | 'select' | 'scroll' | 'wait';
+export type PlannerMode = 'heuristic' | 'llm';
 
-// ── Page representation ──────────────────────────────────────
-
-export interface ElementRect {
-  top: number;
-  left: number;
-  width: number;
-  height: number;
-}
+// ── Page Element ────────────────────────────────────────────────
 
 export interface PageElement {
-  index: number;
+  idx: number;
   tag: string;
-  type?: string;
-  id?: string;
-  name?: string;
-  ariaLabel?: string;
+  role: string;
   text: string;
+  label: string;
+  selector: string;
+  rect: { top: number; left: number; width: number; height: number };
+  isInput: boolean;
+  inputType?: string;
   placeholder?: string;
-  dataTestId?: string;
-  role?: string;
-  href?: string;
-  cssSelector: string;
-  xpath: string;
-  rect: ElementRect;
-  isVisible: boolean;
-  isDisabled: boolean;
-  formContext?: { label?: string; fieldType?: string };
+  isInViewport: boolean;
+  isInDialog: boolean;
 }
 
 export interface PageData {
   url: string;
   title: string;
   elements: PageElement[];
-  pageText: string; // truncated visible text
+  hasOpenDialog: boolean;
 }
 
-// ── Guidance step (also the LLM JSON‑response schema) ────────
+// ── Guidance Step ───────────────────────────────────────────────
 
-export interface StepTarget {
-  strategy: SelectorStrategy;
-  selector: string;
-  textHint: string;
-}
-
-export interface StepValidation {
-  event: ValidationEvent;
-  successHint: string;
-}
-
-/**
- * A single guidance step — the JSON schema enforced on LLM responses.
- *
- * ```json
- * {
- *   "stepTitle":   "string",
- *   "instruction": "string",
- *   "action":      "click|type|select|scroll|wait",
- *   "target":      { "strategy": "css|xpath|text", "selector": "string", "textHint": "string" },
- *   "validation":  { "event": "click|input|change|navigation", "successHint": "string" }
- * }
- * ```
- */
 export interface GuidanceStep {
-  stepTitle: string;
-  instruction: string;
-  action: ActionType;
-  target: StepTarget;
-  validation: StepValidation;
-}
-
-// ── Session state (persisted via chrome.storage.local) ───────
-
-export interface ActionRecord {
   stepNumber: number;
   action: ActionType;
-  url: string;
-  timestamp: number;
+  selector: string;
+  textHint: string;
+  instruction: string;
+}
+
+// ── Session State ───────────────────────────────────────────────
+
+export interface ActionRecord {
+  step: number;
+  action: ActionType;
+  selector: string;
+  text: string;
 }
 
 export interface SessionState {
   goal: string;
-  isActive: boolean;
-  currentStepNumber: number;
-  currentStep: GuidanceStep | null;
-  actionHistory: ActionRecord[];
-  plannerMode: PlannerMode;
+  active: boolean;
+  step: number;
+  current: GuidanceStep | null;
+  history: ActionRecord[];
+  mode: PlannerMode;
 }
 
-// ── LLM configuration ────────────────────────────────────────
+// ── LLM Config ──────────────────────────────────────────────────
 
 export interface LLMConfig {
-  endpoint: string;   // e.g. "https://api.openai.com/v1/chat/completions"
-  apiKey: string;
-  model: string;      // e.g. "gpt-4o-mini"
   provider: 'openai' | 'anthropic' | 'custom';
+  endpoint: string;
+  apiKey: string;
+  model: string;
 }
 
-// ── Messages between background ↔ content ↔ sidepanel ───────
+// ── Messages ────────────────────────────────────────────────────
 
 export type Message =
-  | { type: 'START_GUIDANCE'; goal: string; mode: PlannerMode }
-  | { type: 'STOP_GUIDANCE' }
+  | { type: 'START'; goal: string; mode: PlannerMode }
+  | { type: 'STOP' }
+  | { type: 'SKIP' }
   | { type: 'RESCAN' }
-  | { type: 'SKIP_STEP' }
-  | { type: 'EXTRACT_PAGE' }
+  | { type: 'EXTRACT' }
   | { type: 'PAGE_DATA'; data: PageData }
-  | { type: 'SHOW_STEP'; step: GuidanceStep; stepNumber: number }
-  | { type: 'CLEAR_OVERLAY' }
-  | { type: 'ACTION_COMPLETED'; action: ActionType }
-  | { type: 'STATE_UPDATE'; state: SessionState }
-  | { type: 'NAVIGATION_DETECTED'; url: string }
+  | { type: 'SHOW_STEP'; step: GuidanceStep }
+  | { type: 'HIDE_OVERLAY' }
+  | { type: 'ACTION_DONE'; action: ActionType }
+  | { type: 'NAV_CHANGE'; url: string }
   | { type: 'GET_STATE' }
-  | { type: 'ERROR'; message: string };
+  | { type: 'STATE'; state: SessionState }
+  | { type: 'ERROR'; msg: string };

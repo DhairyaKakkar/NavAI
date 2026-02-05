@@ -1,164 +1,170 @@
-/**
- * NavAI — Side‑panel UI
- *
- * Lets the user enter a goal, choose planner mode, view current
- * step, and control guidance (rescan / skip / stop).
- */
+// ═══════════════════════════════════════════════════════════════
+// NavAI — Side Panel UI
+// ═══════════════════════════════════════════════════════════════
 
 import type { Message, SessionState, PlannerMode, LLMConfig } from '../shared/types';
 
-// ── DOM refs ─────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// DOM ELEMENTS
+// ═════════════════════════════════════════════════════════════════
 
-const $  = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-const goalSection   = $('goal-section');
+const goalSection = $('goal-section');
 const activeSection = $('active-section');
-const goalInput     = $<HTMLTextAreaElement>('goal-input');
-const startBtn      = $<HTMLButtonElement>('start-btn');
+const goalInput = $<HTMLTextAreaElement>('goal');
+const startBtn = $<HTMLButtonElement>('start');
+const modeSelect = $<HTMLSelectElement>('mode');
 
-const goalDisplay    = $('goal-display');
-const stepLabel      = $('step-label');
-const stepInstruction = $('step-instruction');
-const stepAction     = $('step-action');
-const errorBox       = $('error-box');
+const goalDisplay = $('goal-display');
+const stepNum = $('step-num');
+const instruction = $('instruction');
+const errorBox = $('error');
 
-const rescanBtn = $<HTMLButtonElement>('rescan-btn');
-const skipBtn   = $<HTMLButtonElement>('skip-btn');
-const stopBtn   = $<HTMLButtonElement>('stop-btn');
+const rescanBtn = $<HTMLButtonElement>('rescan');
+const skipBtn = $<HTMLButtonElement>('skip');
+const stopBtn = $<HTMLButtonElement>('stop');
 
-const historyCount = $('history-count');
-const historyList  = $<HTMLOListElement>('history-list');
+const llmSection = $('llm-section');
+const providerSelect = $<HTMLSelectElement>('provider');
+const endpointInput = $<HTMLInputElement>('endpoint');
+const apiKeyInput = $<HTMLInputElement>('apikey');
+const modelInput = $<HTMLInputElement>('model');
+const saveBtn = $<HTMLButtonElement>('save-llm');
 
-const llmConfig    = $('llm-config');
-const llmProvider  = $<HTMLSelectElement>('llm-provider');
-const llmEndpoint  = $<HTMLInputElement>('llm-endpoint');
-const llmKey       = $<HTMLInputElement>('llm-key');
-const llmModel     = $<HTMLInputElement>('llm-model');
-const saveLlmBtn   = $<HTMLButtonElement>('save-llm');
+const historyList = $<HTMLOListElement>('history');
 
-const modeRadios = document.querySelectorAll<HTMLInputElement>('input[name="mode"]');
-
-// ── Helpers ──────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// HELPERS
+// ═════════════════════════════════════════════════════════════════
 
 function send(msg: Message): Promise<any> {
   return chrome.runtime.sendMessage(msg);
 }
 
-function hide(el: HTMLElement)  { el.classList.add('hidden'); }
-function show(el: HTMLElement)  { el.classList.remove('hidden'); }
+function show(el: HTMLElement) { el.classList.remove('hidden'); }
+function hide(el: HTMLElement) { el.classList.add('hidden'); }
 
-// ── Default endpoints per provider ───────────────────────────
-
-const DEFAULT_ENDPOINTS: Record<string, string> = {
-  openai:    'https://api.openai.com/v1/chat/completions',
-  anthropic: 'https://api.anthropic.com/v1/messages',
-  custom:    '',
-};
-
-// ── Render state ─────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// RENDER
+// ═════════════════════════════════════════════════════════════════
 
 function render(state: SessionState) {
-  if (!state.isActive) {
+  if (!state.active) {
     show(goalSection);
     hide(activeSection);
+    hide(errorBox);
     return;
   }
 
   hide(goalSection);
   show(activeSection);
 
-  goalDisplay.textContent = `Goal: ${state.goal}`;
+  goalDisplay.textContent = state.goal;
+  stepNum.textContent = `Step ${state.step}`;
 
-  if (state.currentStep) {
+  if (state.current) {
+    instruction.textContent = state.current.instruction;
     hide(errorBox);
-    stepLabel.textContent       = state.currentStep.stepTitle;
-    stepInstruction.textContent = state.currentStep.instruction;
-    stepAction.textContent      = state.currentStep.action;
-    show(stepAction);
   } else {
-    stepLabel.textContent       = '';
-    stepInstruction.textContent = 'Scanning page…';
-    hide(stepAction);
+    instruction.textContent = 'Scanning page...';
   }
 
-  // history
-  historyCount.textContent = String(state.actionHistory.length);
+  // History
   historyList.innerHTML = '';
-  for (const h of state.actionHistory) {
+  for (const h of state.history) {
     const li = document.createElement('li');
-    li.textContent = `Step ${h.stepNumber}: ${h.action} — ${new URL(h.url || 'about:blank').hostname || '(same page)'}`;
+    li.textContent = `${h.action}: "${h.text.substring(0, 30)}"`;
     historyList.appendChild(li);
   }
 }
 
-// ── LLM config toggle ───────────────────────────────────────
+function showError(msg: string) {
+  errorBox.textContent = msg;
+  show(errorBox);
+}
 
-modeRadios.forEach(r => r.addEventListener('change', () => {
-  const mode = (document.querySelector<HTMLInputElement>('input[name="mode"]:checked'))!.value;
-  if (mode === 'llm') show(llmConfig); else hide(llmConfig);
-}));
+// ═════════════════════════════════════════════════════════════════
+// LLM CONFIG
+// ═════════════════════════════════════════════════════════════════
 
-llmProvider.addEventListener('change', () => {
-  const prov = llmProvider.value;
-  llmEndpoint.value = DEFAULT_ENDPOINTS[prov] ?? '';
+const DEFAULT_ENDPOINTS: Record<string, string> = {
+  openai: 'https://api.openai.com/v1/chat/completions',
+  anthropic: 'https://api.anthropic.com/v1/messages',
+  custom: '',
+};
+
+modeSelect.addEventListener('change', () => {
+  if (modeSelect.value === 'llm') {
+    show(llmSection);
+  } else {
+    hide(llmSection);
+  }
 });
 
-saveLlmBtn.addEventListener('click', async () => {
+providerSelect.addEventListener('change', () => {
+  endpointInput.value = DEFAULT_ENDPOINTS[providerSelect.value] ?? '';
+});
+
+saveBtn.addEventListener('click', async () => {
   const cfg: LLMConfig = {
-    provider: llmProvider.value as LLMConfig['provider'],
-    endpoint: llmEndpoint.value.trim() || DEFAULT_ENDPOINTS[llmProvider.value] || '',
-    apiKey:   llmKey.value.trim(),
-    model:    llmModel.value.trim(),
+    provider: providerSelect.value as LLMConfig['provider'],
+    endpoint: endpointInput.value || DEFAULT_ENDPOINTS[providerSelect.value] || '',
+    apiKey: apiKeyInput.value,
+    model: modelInput.value || 'gpt-4o-mini',
   };
-  await chrome.storage.local.set({ navai_llm_config: cfg });
-  saveLlmBtn.textContent = 'Saved!';
-  setTimeout(() => { saveLlmBtn.textContent = 'Save LLM settings'; }, 1500);
+  await chrome.storage.local.set({ navai_llm: cfg });
+  saveBtn.textContent = 'Saved!';
+  setTimeout(() => { saveBtn.textContent = 'Save'; }, 1500);
 });
-
-// ── Load saved LLM config ────────────────────────────────────
 
 async function loadLLMConfig() {
-  const r = await chrome.storage.local.get('navai_llm_config');
-  const cfg: LLMConfig | undefined = r.navai_llm_config;
+  const r = await chrome.storage.local.get('navai_llm');
+  const cfg: LLMConfig | undefined = r.navai_llm;
   if (cfg) {
-    llmProvider.value  = cfg.provider;
-    llmEndpoint.value  = cfg.endpoint;
-    llmKey.value       = cfg.apiKey;
-    llmModel.value     = cfg.model;
+    providerSelect.value = cfg.provider;
+    endpointInput.value = cfg.endpoint;
+    apiKeyInput.value = cfg.apiKey;
+    modelInput.value = cfg.model;
   }
 }
 
-// ── Actions ──────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// ACTIONS
+// ═════════════════════════════════════════════════════════════════
 
 startBtn.addEventListener('click', async () => {
   const goal = goalInput.value.trim();
-  if (!goal) { goalInput.focus(); return; }
+  if (!goal) {
+    goalInput.focus();
+    return;
+  }
 
-  const mode = (document.querySelector<HTMLInputElement>('input[name="mode"]:checked'))!.value as PlannerMode;
-
+  const mode = modeSelect.value as PlannerMode;
   startBtn.disabled = true;
-  await send({ type: 'START_GUIDANCE', goal, mode });
+  await send({ type: 'START', goal, mode });
   startBtn.disabled = false;
 });
 
 rescanBtn.addEventListener('click', () => send({ type: 'RESCAN' }));
-skipBtn.addEventListener('click',   () => send({ type: 'SKIP_STEP' }));
-stopBtn.addEventListener('click',   () => send({ type: 'STOP_GUIDANCE' }));
+skipBtn.addEventListener('click', () => send({ type: 'SKIP' }));
+stopBtn.addEventListener('click', () => send({ type: 'STOP' }));
 
-// ── Listen for state broadcasts ──────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// MESSAGE LISTENER
+// ═════════════════════════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((msg: Message) => {
-  if (msg.type === 'STATE_UPDATE') render(msg.state);
-  if (msg.type === 'ERROR') {
-    errorBox.textContent = msg.message;
-    show(errorBox);
-  }
+  if (msg.type === 'STATE') render(msg.state);
+  if (msg.type === 'ERROR') showError(msg.msg);
 });
 
-// ── Boot: request current state ──────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// INIT
+// ═════════════════════════════════════════════════════════════════
 
 (async () => {
   await loadLLMConfig();
   const resp = await send({ type: 'GET_STATE' });
-  if (resp?.type === 'STATE_UPDATE') render(resp.state);
+  if (resp?.type === 'STATE') render(resp.state);
 })();
